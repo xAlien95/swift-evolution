@@ -6,6 +6,52 @@
 * Status: **Active Review (March 31 - April 16 2021)**
 * Implementation: Available in [recent `main` snapshots](https://swift.org/download/#snapshots) behind the flag `-Xfrontend -enable-experimental-concurrency`
 
+## Table of Contents
+
+- [Introduction](#introduction)
+- [Motivation](#motivation)
+- [Structured concurrency](#structured-concurrency)
+	- [Tasks](#tasks)
+	- [Child tasks](#child-tasks)
+	- [Partial tasks](#partial-tasks)
+	- [Executors](#executors)
+	- [Task priorities](#task-priorities)
+	- [Priority Escalation](#priority-escalation)
+- [Proposed solution](#proposed-solution)
+	- [Task groups and child tasks](#task-groups-and-child-tasks)
+	- [Detached tasks](#detached-tasks)
+	- [Asynchronous programs](#asynchronous-programs)
+	- [Cancellation](#cancellation)
+	- [Access from synchronous functions](#access-from-synchronous-functions)
+- [Detailed design](#detailed-design)
+	- [Task API](#task-api)
+		- [`Task` type](#task-type)
+		- [`UnsafeCurrentTask` type](#unsafecurrenttask-type)
+		- [Task priorities](#task-priorities-1)
+		- [Task handles](#task-handles)
+		- [Detached tasks](#detached-tasks-1)
+		- [Cancellation](#cancellation-1)
+		- [Cancellation handlers](#cancellation-handlers)
+		- [Voluntary Suspension](#voluntary-suspension)
+		- [Cancellation](#cancellation-2)
+		- [Task priorities](#task-priorities-2)
+		- [Task Groups](#task-groups)
+			- [Spawning TaskGroup child tasks](#spawning-taskgroup-child-tasks)
+			- [Querying tasks in the group](#querying-tasks-in-the-group)
+			- [Task group cancellation](#task-group-cancellation)
+- [Source compatibility](#source-compatibility)
+- [Effect on ABI stability](#effect-on-abi-stability)
+- [Effect on API resilience](#effect-on-api-resilience)
+- [Revision history](#revision-history)
+	- [Review changes](#review-changes)
+	- [Pitch changes](#pitch-changes)
+- [Alternatives Considered](#alternatives-considered)
+	- [Prominent futures](#prominent-futures)
+- [Future directions](#future-directions)
+	- [`async let` or `spawn` to spawn child tasks within a scope](#async-let-or-spawn-to-spawn-child-tasks-within-a-scope)
+	- [`@Sendable` closure checking for task groups](#sendable-closure-checking-for-task-groups)
+	- [Suspending `await group.spawn`](#suspending-await-groupspawn)
+
 ## Introduction
 
 [`async`/`await`](https://github.com/apple/swift-evolution/blob/main/proposals/0296-async-await.md) is a language mechanism for writing natural, efficient asynchronous code. Asynchronous functions (introduced with `async`) can give up the thread on which they are executing at any given suspension point (marked with `await`), which is necessary for building highly-concurrent systems.
@@ -288,7 +334,7 @@ func chopVegetables() async throws -> [Vegetable] {
     // Create a new child task for each vegetable that needs to be chopped.
     for v in rawVeggies {
       group.spawn { 
-        v.chopped()
+        try await v.chopped()
       }
     }
 
@@ -406,7 +452,7 @@ func chop(_ vegetable: Vegetable) async throws -> Vegetable {
   
   guard !Task.isCancelled else { 
     print("Cancelled mid-way through chopping of \(vegetable)!")
-    throw CancellationError() 
+    throw Task.CancellationError() 
   } 
   // chop some more, chop chop chop ...
 }
@@ -1291,7 +1337,7 @@ Alternatively, we may want to express this as `spawn` in similar manner to how `
 In addition to `async let`, the scoped nature of task groups and child tasks would make it natural for child tasks to be able to do more ad-hoc mutation of captured state from their captured context. Because child tasks are guaranteed to
 have completed by the time a `withTaskGroup` block finishes executing, it would theoretically be safe to allow them to mutate captured local variables, as long as every child task captures a disjoint set of variables, and the variables are not referenced in the enclosing context until the task group completes, as in:
 
-```
+```swift
 var numApplesProcessed = 0
 var numBananasProcessed = 0
 withTaskGroup { group in
